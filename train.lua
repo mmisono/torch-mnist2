@@ -3,13 +3,11 @@ require 'optim'
 local M = {}
 local Trainer = torch.class('Trainer', M)
 
-function Trainer:__init(model, criterion, opt, trainData, valData)
+function Trainer:__init(model, criterion, opt)
     self.model = model
     self.criterion = criterion
     self.opt = opt
     self.params, self.gradParams = model:getParameters()
-    self.trainData = trainData
-    self.valData = valData
 
     self.optimState = {
         learningRate = opt.learningRate,
@@ -26,10 +24,9 @@ function Trainer:__init(model, criterion, opt, trainData, valData)
 end
 
 
-function Trainer:train(epoch)
+function Trainer:train(epoch, dataloader)
     self.model:training()
-    trainSize = self.trainData:size()
-    local shuffle = torch.randperm(trainSize)
+    trainSize = dataloader:size()
     local timer = torch.Timer()
 
     function feval()
@@ -37,42 +34,22 @@ function Trainer:train(epoch)
     end
 
     print('=> Training epoch # ' .. epoch)
-    local n = 0
-    for t = 1,trainSize,self.opt.batchSize do
-        if t + self.opt.batchSize-1 > trainSize then
-          break
-        end
-        n = n + self.opt.batchSize
-    
-        xlua.progress(t, trainSize)
-    
-        -- create mini batch
-        local input = torch.Tensor(self.opt.batchSize, 1, 32, 32) -- input size: 32x32
-        local target = torch.Tensor(self.opt.batchSize)
-        for i = t, t+self.opt.batchSize-1 do
-            local sample = self.trainData[shuffle[i]]
-            local _, target_ = sample[2]:clone():max(1)
-            target_ = target_:squeeze()
-            input[i-t+1] = sample[1]:clone()
-            target[i-t+1] = target_
-        end
-        if self.opt.backend == 'cudnn' or self.opt.backend == 'cunn' then
-            input = input:cuda()
-            target = target:cuda()
-        end
+    -- dataloader return mini-batch sample
+    for n, sample in dataloader:run() do
 
-        local output = self.model:forward(input)
-        local loss = self.criterion:forward(self.model.output, target)
+        self:copyInputs(sample)
+    
+        local output = self.model:forward(self.input):float()
+        local loss = self.criterion:forward(self.model.output, self.target)
 
         self.model:zeroGradParameters()
-        self.criterion:backward(self.model.output, target)
+        self.criterion:backward(self.model.output, self.target)
+        self.model:backward(self.input, self.criterion.gradInput)
 
-        self.model:backward(input, self.criterion.gradInput)
-        self.criterion:backward(output, target)
         optim.sgd(feval, self.params, self.optimState)
     
         if self.opt.confusion then
-            self.confusion:batchAdd(output, target)
+            self.confusion:batchAdd(output, self.target)
         end
     end
     if self.opt.confusion then
@@ -81,8 +58,35 @@ function Trainer:train(epoch)
     end
 end
 
+function Trainer:copyInputs(sample)
+    --self.input = self.input or (self.opt.nGPU == 1
+    --   and torch.CudaTensor()
+    --   or cutorch.createCudaHostTensor())
+    self.input = self.input or torch.CudaTensor()
+    self.target = self.target or torch.CudaTensor()
 
-function Trainer:test(epoch)
+    self.input:resize(sample.input:size()):copy(sample.input)
+    self.target:resize(sample.target:size()):copy(sample.target)
+end
+
+function Trainer:test(epoch, dataloader)
+    self.model:evaluate()
+    testSize = dataloader:size()
+    for n, sample in dataloader:run() do
+        self:copyInputs(sample)
+    
+        local output = self.model:forward(self.input):float()
+        local loss = self.criterion:forward(self.model.output, self.target)
+
+        if self.opt.confusion then
+            self.confusion:batchAdd(output, self.target)
+        end
+    end
+
+    if self.opt.confusion then
+        print(self.confusion)
+        self.confusion:zero()
+    end
 end
 
 return M.Trainer

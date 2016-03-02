@@ -1,7 +1,7 @@
 
 require "nn"
 
-local ninputs = 32*32
+local ninputs = 28*28
 local nhiddens = 100
 local noutputs = 10
 
